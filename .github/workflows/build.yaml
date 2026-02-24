@@ -1,0 +1,143 @@
+name: Build
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 */7 * *"
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+    name: Build ${{ matrix.platform }} image
+    steps:
+      - name: Checkout API repo
+        uses: actions/checkout@v4
+        with:
+          repository: 'tdlib/telegram-bot-api'
+          path: '/home/runner/work/telegram-bot-api/telegram-bot-api/telegram-bot-api'
+      - name: Checkout Dockerfile
+        uses: actions/checkout@v4
+        with:
+          repository: 'xsadegh/telegram-bot-api'
+          path: '/home/runner/work/telegram-bot-api/telegram-bot-api/docker'
+      - name: Apply Dockerfile
+        run: |
+          cp /home/runner/work/telegram-bot-api/telegram-bot-api/docker/Dockerfile /home/runner/work/telegram-bot-api/telegram-bot-api/telegram-bot-api/Dockerfile
+      - name: Get release sha and run number
+        id: get_sha
+        run: |
+          echo "GITHUB_SHA=$(echo ${GITHUB_SHA::8})" >> $GITHUB_ENV
+          echo "GITHUB_RUN_ID=$(echo ${GITHUB_RUN_NUMBER})" >> $GITHUB_ENV
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GCHR_PAT }}
+      - name: Prepare for push
+        id: prep
+        run: |
+          DOCKER_IMAGE=ghcr.io/${{ github.repository_owner }}/telegram-bot-api/telegram-api-server
+          VERSION=edge
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            VERSION=nightly
+          fi
+          # Platform-specific tag for this build job
+          PLATFORM_TAG=$(echo ${{ matrix.platform }} | sed 's/\//-/g')
+          TAGS="${DOCKER_IMAGE}:${VERSION}-${PLATFORM_TAG}"
+          TAGS="$TAGS,${DOCKER_IMAGE}:${{ env.GITHUB_SHA }}-${PLATFORM_TAG}"
+
+          TG_API_VERSION=$(grep "project(TelegramBotApi" /home/runner/work/telegram-bot-api/telegram-bot-api/telegram-bot-api/CMakeLists.txt | awk '{print $3}')
+          echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tg_api_version=${TG_API_VERSION}" >> $GITHUB_OUTPUT
+          echo "image=${DOCKER_IMAGE}" >> $GITHUB_OUTPUT
+          # lowercase the branch name
+          BRANCH=$(echo ${GITHUB_REF##*/} | tr '[A-Z]' '[a-z]')
+          LABELS="org.opencontainers.image.revision=$GITHUB_SHA"
+          LABELS="$LABELS,org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          LABELS="$LABELS,org.opencontainers.image.version=$VERSION"
+          LABELS="$LABELS,com.github.repo.branch=$BRANCH"
+          LABELS="$LABELS,com.github.repo.dockerfile=Dockerfile"
+          echo "labels=${LABELS}" >> $GITHUB_OUTPUT
+          BUILD_ARGS="BRANCH=$BRANCH"
+          echo "args=${BUILD_ARGS}" >> $GITHUB_OUTPUT
+      - name: Tag names
+        run: echo ${{ steps.prep.outputs.tags }}
+      - name: Build and push
+        id: docker_build
+        timeout-minutes: 350
+        uses: docker/build-push-action@v6
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: /home/runner/work/telegram-bot-api/telegram-bot-api/telegram-bot-api
+          file: /home/runner/work/telegram-bot-api/telegram-bot-api/telegram-bot-api/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.prep.outputs.tags }}
+          build-args: ${{ steps.prep.outputs.args }}
+          labels: ${{ steps.prep.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+    outputs:
+      version: ${{ steps.prep.outputs.version }}
+      tg_api_version: ${{ steps.prep.outputs.tg_api_version }}
+      image: ${{ steps.prep.outputs.image }}
+
+  create-manifest:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request'
+    name: Create multi-arch manifest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GCHR_PAT }}
+      - name: Get build outputs
+        id: outputs
+        run: |
+          echo "VERSION=${{ needs.build.outputs.version }}" >> $GITHUB_ENV
+          echo "TG_API_VERSION=${{ needs.build.outputs.tg_api_version }}" >> $GITHUB_ENV
+          echo "IMAGE=${{ needs.build.outputs.image }}" >> $GITHUB_ENV
+      - name: Create and push manifest
+        run: |
+          # Create multi-arch manifests for all tags
+          docker buildx imagetools create -t ${IMAGE}:${VERSION} \
+            ${IMAGE}:${VERSION}-linux-amd64 \
+            ${IMAGE}:${VERSION}-linux-arm64
+
+          docker buildx imagetools create -t ${IMAGE}:${GITHUB_SHA::8} \
+            ${IMAGE}:${GITHUB_SHA::8}-linux-amd64 \
+            ${IMAGE}:${GITHUB_SHA::8}-linux-arm64
+
+          docker buildx imagetools create -t ${IMAGE}:latest \
+            ${IMAGE}:${VERSION}-linux-amd64 \
+            ${IMAGE}:${VERSION}-linux-arm64
+
+          docker buildx imagetools create -t ${IMAGE}:1.0.${GITHUB_RUN_NUMBER} \
+            ${IMAGE}:${VERSION}-linux-amd64 \
+            ${IMAGE}:${VERSION}-linux-arm64
+
+          docker buildx imagetools create -t ${IMAGE}:api-${TG_API_VERSION} \
+            ${IMAGE}:${VERSION}-linux-amd64 \
+            ${IMAGE}:${VERSION}-linux-arm64
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect ${IMAGE}:${VERSION}
+          docker buildx imagetools inspect ${IMAGE}:latest
