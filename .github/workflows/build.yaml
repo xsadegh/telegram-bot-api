@@ -128,24 +128,19 @@ jobs:
         run: |
           # Create multi-arch manifests for all tags
           docker buildx imagetools create -t ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-linux-amd64 \
-            ${IMAGE}:${VERSION}-linux-arm64
+            ${IMAGE}:${VERSION}-linux-amd64
 
           docker buildx imagetools create -t ${IMAGE}:${GITHUB_SHA::8} \
-            ${IMAGE}:${GITHUB_SHA::8}-linux-amd64 \
-            ${IMAGE}:${GITHUB_SHA::8}-linux-arm64
+            ${IMAGE}:${GITHUB_SHA::8}-linux-amd64
 
           docker buildx imagetools create -t ${IMAGE}:latest \
-            ${IMAGE}:${VERSION}-linux-amd64 \
-            ${IMAGE}:${VERSION}-linux-arm64
+            ${IMAGE}:${VERSION}-linux-amd64
 
           docker buildx imagetools create -t ${IMAGE}:1.0.${GITHUB_RUN_NUMBER} \
-            ${IMAGE}:${VERSION}-linux-amd64 \
-            ${IMAGE}:${VERSION}-linux-arm64
+            ${IMAGE}:${VERSION}-linux-amd64
 
           docker buildx imagetools create -t ${IMAGE}:api-${TG_API_VERSION} \
-            ${IMAGE}:${VERSION}-linux-amd64 \
-            ${IMAGE}:${VERSION}-linux-arm64
+            ${IMAGE}:${VERSION}-linux-amd64
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect ${IMAGE}:${VERSION}
